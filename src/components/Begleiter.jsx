@@ -87,14 +87,22 @@ const BANK_LIST = [
 ];
 
 const STREAMING_LIST = [
-  {id:"netflix", name:"Netflix",      street:"c/o Netflix International B.V., Herengracht 597",plz:"1017 CE",city:"Amsterdam",  email:"info@netflix.com"},
-  {id:"amazon",  name:"Amazon Prime", street:"Marcel-Breuer-Str. 12",   plz:"80807",city:"München",    email:"cs-reply@amazon.de"},
-  {id:"spotify", name:"Spotify",      street:"Regeringsgatan 19",       plz:"111 53",city:"Stockholm",  email:"support@spotify.com"},
-  {id:"disney",  name:"Disney+",      street:"3 Queen Caroline St",     plz:"W6 9PE",city:"London",     email:"support@disneyplus.com"},
-  {id:"dazn",    name:"DAZN",         street:"Postfach",                plz:"60528",city:"Frankfurt",   email:"help@dazn.com"},
-  {id:"sky",     name:"Sky / WOW",    street:"Medienallee 26",          plz:"85774",city:"Unterföhring",email:"kuendigung@sky.de"},
-  {id:"appletv", name:"Apple TV+",    street:"Hollyhill Industrial Est.",plz:"T23 YK84",city:"Cork, Irland",email:"–"},
-  {id:"magenta", name:"MagentaTV",    street:"Postfach 2000",           plz:"53105",city:"Bonn",        email:"kuendigung@telekom.de"},
+  {id:"netflix", name:"Netflix",      street:"c/o Netflix International B.V., Herengracht 597",plz:"1017 CE",city:"Amsterdam",  email:"info@netflix.com",
+   digitalUrl:"https://www.netflix.com/cancelplan", digitalSteps:["Auf netflix.com einloggen","Oben rechts auf Profilbild → ‚Konto'","‚Mitgliedschaft kündigen' klicken","Kündigung bestätigen – sofort wirksam"]},
+  {id:"amazon",  name:"Amazon Prime", street:"Marcel-Breuer-Str. 12",   plz:"80807",city:"München",    email:"cs-reply@amazon.de",
+   digitalUrl:"https://www.amazon.de/mc/pipelines/cancellation", digitalSteps:["Auf amazon.de einloggen","‚Konto & Listen' → ‚Prime-Mitgliedschaft'","‚Prime kündigen' wählen","Bestätigen – Ende des Abrechnungszeitraums"]},
+  {id:"spotify", name:"Spotify",      street:"Regeringsgatan 19",       plz:"111 53",city:"Stockholm",  email:"support@spotify.com",
+   digitalUrl:"https://www.spotify.com/de/account/subscription/cancel", digitalSteps:["Auf spotify.com einloggen","‚Abonnement' → ‚Premium kündigen'","Kündigung bestätigen – läuft bis Periodenende"]},
+  {id:"disney",  name:"Disney+",      street:"3 Queen Caroline St",     plz:"W6 9PE",city:"London",     email:"support@disneyplus.com",
+   digitalUrl:"https://www.disneyplus.com/de-de/account", digitalSteps:["Auf disneyplus.com einloggen","‚Konto' → ‚Abonnement'","‚Abonnement kündigen' klicken","Bestätigen – Ende des Abrechnungszeitraums"]},
+  {id:"dazn",    name:"DAZN",         street:"Postfach",                plz:"60528",city:"Frankfurt",   email:"help@dazn.com",
+   digitalUrl:"https://www.dazn.com/de-DE/account", digitalSteps:["Auf dazn.com einloggen","‚Mein Konto' → ‚Abonnement verwalten'","‚Kündigen' wählen und bestätigen"]},
+  {id:"sky",     name:"Sky / WOW",    street:"Medienallee 26",          plz:"85774",city:"Unterföhring",email:"kuendigung@sky.de",
+   digitalUrl:"https://www.sky.de/produkte/sky-kuendigen", digitalSteps:["Auf sky.de einloggen → ‚Mein Sky'","‚Vertrag & Kündigung' aufrufen","Online-Kündigungsformular ausfüllen","Alternativ: 0800 / 100 99 00 (kostenlos)"]},
+  {id:"appletv", name:"Apple TV+",    street:"Hollyhill Industrial Est.",plz:"T23 YK84",city:"Cork, Irland",email:"–",
+   digitalUrl:"https://appleid.apple.com", digitalSteps:["Auf appleid.apple.com einloggen","‚Abonnements' öffnen","‚Apple TV+' auswählen → ‚Kündigen'","Alternativ: iPhone → Einstellungen → Apple-ID → Abonnements"]},
+  {id:"magenta", name:"MagentaTV",    street:"Postfach 2000",           plz:"53105",city:"Bonn",        email:"kuendigung@telekom.de",
+   digitalUrl:"https://www.telekom.de/hilfe/meintelekom", digitalSteps:["Auf telekom.de → ‚Mein Telekom' einloggen","‚Verträge & Buchungen' öffnen","MagentaTV-Vertrag auswählen → ‚Kündigen'"]},
 ];
 
 const INSURANCE_LIST = [
@@ -165,13 +173,22 @@ function buildLetter(taskId, d, provider) {
 }
 
 // ─── DEFAULT + DYNAMIC TASKS ──────────────────────────────────────────────────
+// Korrekte Reihenfolge nach deutschem Recht:
+// 1. Bestatter (sofort – übernimmt Überführung & koordiniert vieles)
+// 2. Sterbeurkunde (Pflicht innerhalb 3 Werktage am Standesamt)
+// 3. Testament (muss zeitnah beim Nachlassgericht abgegeben werden)
+// 4. Krankenversicherung (Einzüge stoppen)
+// 5. Rentenversicherung (Überzahlung vermeiden)
+// 6. Vermieter – dynamisch per makeTasks() eingefügt
+// 7. Bank (diese Woche)
+// 8. Internet/Mobil/Streaming/Versicherung – per makeTasks() eingefügt
 const BASE_TASKS = [
-  {id:"sterbeurkunde",      cat:"urgent",icon:"📄",title:"Sterbeurkunde beantragen",       inst:"Standesamt",               desc:"Das wichtigste Dokument. Ohne Sterbeurkunde lassen sich alle weiteren Schritte nicht einleiten.",         comm:true},
-  {id:"krankenversicherung",cat:"urgent",icon:"🏥",title:"Krankenversicherung kündigen",    inst:"Krankenkasse",             desc:"Einzüge stoppen, Mitgliedschaft zum Todestag beenden, Rückerstattung für Zeitraum nach Tod prüfen.",      comm:true,isKV:true},
-  {id:"rentenversicherung", cat:"urgent",icon:"💰",title:"Rentenversicherung informieren",  inst:"Deutsche Rentenversicherung",desc:"Überzahlte Rente melden und zurücküberweisen. Hinterbliebenenrente prüfen.",                           comm:true},
-  {id:"testament_abgeben",  cat:"urgent",icon:"⚖️",title:"Testament beim Nachlassgericht",  inst:"Nachlassgericht",          desc:"Muss persönlich abgegeben werden. Das Gericht eröffnet das Testament und lädt alle Beteiligten.",         comm:false},
-  {id:"bestattung",         cat:"urgent",icon:"🕯️",title:"Bestattungsinstitut wählen",      inst:"Bestattung",               desc:"Bestattungsform wählen, Institut beauftragen, Termin koordinieren.",                                     comm:false,isFuneral:true},
-  {id:"bank",               cat:"week",  icon:"🏦",title:"Bank informieren",                inst:"Hausbank",                 desc:"Kontosperrung beantragen. Klären welche Dokumente (z. B. Erbschein) für weitere Kontoabwicklung nötig.", comm:true},
+  {id:"bestattung",         cat:"urgent",icon:"🕯️",title:"Bestattungsinstitut beauftragen", inst:"Bestattung",               desc:"Erster und wichtigster Schritt: Das Institut übernimmt die Überführung, koordiniert den Totenschein und unterstützt bei der Sterbeurkunde. Innerhalb weniger Stunden handeln.",                                     comm:false,isFuneral:true},
+  {id:"sterbeurkunde",      cat:"urgent",icon:"📄",title:"Sterbeurkunde beantragen",         inst:"Standesamt",               desc:"Gesetzliche Pflicht – muss innerhalb von 3 Werktagen beim zuständigen Standesamt des Sterbeorts beantragt werden. Ohne Sterbeurkunde sind alle weiteren Schritte nicht möglich.", comm:true},
+  {id:"testament_abgeben",  cat:"urgent",icon:"⚖️",title:"Testament beim Nachlassgericht",   inst:"Nachlassgericht",          desc:"Jedes bekannte Testament muss unverzüglich beim Nachlassgericht abgegeben werden – auch wenn man selbst Erbe ist. Das Gericht eröffnet es und informiert alle Beteiligten.", comm:false},
+  {id:"krankenversicherung",cat:"urgent",icon:"🏥",title:"Krankenversicherung kündigen",      inst:"Krankenkasse",             desc:"Einzüge sofort stoppen lassen, Mitgliedschaft zum Todestag beenden, Rückerstattung für Zeitraum nach Tod prüfen.",      comm:true,isKV:true},
+  {id:"rentenversicherung", cat:"urgent",icon:"💰",title:"Rentenversicherung informieren",    inst:"Deutsche Rentenversicherung",desc:"Überzahlte Rente muss zurücküberwiesen werden – je schneller die Meldung, desto weniger Überzahlung. Hinterbliebenenrente prüfen.", comm:true},
+  {id:"bank",               cat:"week",  icon:"🏦",title:"Bank informieren",                  inst:"Hausbank",                 desc:"Konten vorläufig sperren lassen, Daueraufträge einstellen. Klären welche Dokumente (z. B. Erbschein) für die weitere Kontoabwicklung nötig sind.", comm:true},
 ];
 
 function makeTasks(data, prov) {
@@ -714,14 +731,36 @@ export default function App() {
           </div>
           <p style={{fontSize:13,color:c.mid,lineHeight:1.7,marginTop:12}}>{active.desc}</p>
         </div>
-        {active.comm&&(
-          <div style={{...cardStyle,border:"1px solid rgba(74,124,111,0.2)"}}>
-            <p style={{fontSize:11,color:c.green,textTransform:"uppercase",letterSpacing:"0.08em",fontWeight:700,margin:"0 0 4px"}}>Schreiben vorbereiten</p>
-            <p style={{fontSize:13,color:c.muted,marginBottom:14}}>Standardisierter DIN-5008-Brief – alle Daten bereits eingefügt.</p>
-            <button style={primaryBtn} onClick={()=>genLetter(active)}>Brief vorbereiten →</button>
+        {/* Streaming: digitale Kündigung + Brief als Alternative */}
+        {active.streamProv?.digitalSteps&&(
+          <div style={{...cardStyle,border:"1px solid rgba(74,124,111,0.2)",marginBottom:10}}>
+            <p style={{fontSize:11,color:c.green,textTransform:"uppercase",letterSpacing:"0.08em",fontWeight:700,margin:"0 0 4px"}}>💻 Online kündigen (empfohlen)</p>
+            <p style={{fontSize:13,color:c.muted,margin:"0 0 12px"}}>Schnellste Methode – direkt im Kundenkonto:</p>
+            <ol style={{margin:"0 0 14px",paddingLeft:18,display:"flex",flexDirection:"column",gap:6}}>
+              {active.streamProv.digitalSteps.map((step,i)=>(
+                <li key={i} style={{fontSize:13,color:c.dark,lineHeight:1.6}}>{step}</li>
+              ))}
+            </ol>
+            <a href={active.streamProv.digitalUrl} target="_blank" rel="noopener noreferrer"
+               style={{...primaryBtn,display:"block",textAlign:"center",textDecoration:"none"}}>
+              Direkt zur Kündigung →
+            </a>
           </div>
         )}
-        {!active.comm&&(
+        {active.comm&&(
+          <div style={{...cardStyle,border:active.streamProv?.digitalSteps?"1px dashed rgba(0,0,0,0.1)":"1px solid rgba(74,124,111,0.2)"}}>
+            <p style={{fontSize:11,color:active.streamProv?.digitalSteps?c.muted:c.green,textTransform:"uppercase",letterSpacing:"0.08em",fontWeight:700,margin:"0 0 4px"}}>
+              {active.streamProv?.digitalSteps?"✉ Alternative: Schriftlich kündigen":"Schreiben vorbereiten"}
+            </p>
+            <p style={{fontSize:13,color:c.muted,marginBottom:14}}>
+              {active.streamProv?.digitalSteps
+                ? "Falls kein Zugang zum Konto: Formeller Brief per Post."
+                : "Standardisierter DIN-5008-Brief – alle Daten bereits eingefügt."}
+            </p>
+            <button style={{...primaryBtn,background:active.streamProv?.digitalSteps?c.mid:c.dark}} onClick={()=>genLetter(active)}>Brief vorbereiten →</button>
+          </div>
+        )}
+        {!active.comm&&!active.streamProv&&(
           <div style={cardStyle}>
             <p style={{fontSize:11,color:c.amber,textTransform:"uppercase",letterSpacing:"0.08em",fontWeight:700,margin:"0 0 4px"}}>Persönlich erforderlich</p>
             <p style={{fontSize:13,color:c.muted,marginBottom:14}}>Dieser Schritt muss persönlich erledigt werden.</p>
