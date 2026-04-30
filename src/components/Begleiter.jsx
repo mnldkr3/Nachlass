@@ -5,6 +5,14 @@ import {
   KV_LIST,
   mkAddr, fmtDate, buildLetter, makeTasks, OB, getFaq
 } from "@/lib/begleiter-data";
+import {
+  signIn, signUp, signOut, getCurrentUser, onAuthChange,
+  loadEstate, saveEstate,
+  loadStatuses, upsertStatus, deleteStatus,
+  loadDocuments, uploadDocument, deleteDocument, getDocumentUrl,
+  loadMessages, insertMessage, markMessageRead, deleteMessage,
+} from "@/lib/store";
+import { supabaseAvailable } from "@/lib/supabase";
 
 // ─── TOKENS & STYLES ─────────────────────────────────────────────────────────
 const c = {
@@ -32,25 +40,14 @@ const bgGradient = (
   <div style={{position:"fixed",inset:0,background:"radial-gradient(ellipse at 15% 10%,#DDD5C8,transparent 55%),radial-gradient(ellipse at 85% 85%,#C8D5D0,transparent 55%)",zIndex:0,pointerEvents:"none"}}/>
 );
 
-// ─── LOCAL STORAGE HELPERS ───────────────────────────────────────────────────
-const LS_PREFIX = "nachlass:";
-const lsGet = (k, fb) => {
-  if (typeof window === "undefined") return fb;
-  try { const v = localStorage.getItem(LS_PREFIX+k); return v ? JSON.parse(v) : fb; }
-  catch { return fb; }
-};
-const lsSet = (k, v) => {
-  if (typeof window === "undefined") return;
-  try { localStorage.setItem(LS_PREFIX+k, JSON.stringify(v)); } catch {/* quota */}
-};
-
-// Simple password hash (NOT secure - placeholder for real auth)
-const hashPwd = async (pwd) => {
-  if (typeof window === "undefined" || !window.crypto?.subtle) return pwd;
-  const buf = new TextEncoder().encode(pwd + "nachlass-salt");
-  const hash = await crypto.subtle.digest("SHA-256", buf);
-  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2,"0")).join("");
-};
+// Debounce helper for autosave
+function useDebouncedEffect(cb, deps, delay) {
+  useEffect(() => {
+    const t = setTimeout(cb, delay);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+}
 
 // ─── SERVICE LOGO ────────────────────────────────────────────────────────────
 function ServiceLogo({ domain, name, size = 32, fallbackEmoji }) {
@@ -296,22 +293,28 @@ function AuthView({ onAuth }) {
 
   const submit = async () => {
     setErr("");
+    if (!supabaseAvailable()) {
+      setErr("Supabase nicht konfiguriert. NEXT_PUBLIC_SUPABASE_URL und NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local setzen.");
+      return;
+    }
     if (!email.includes("@")) { setErr("Bitte gültige E-Mail eingeben."); return; }
     if (pwd.length < 6) { setErr("Passwort: mind. 6 Zeichen."); return; }
     if (mode==="register" && !name.trim()) { setErr("Name eingeben."); return; }
     setBusy(true);
-
-    const accounts = lsGet("accounts", {});
-    const hashed = await hashPwd(pwd);
-    if (mode==="register") {
-      if (accounts[email]) { setErr("Diese E-Mail ist bereits registriert."); setBusy(false); return; }
-      accounts[email] = { name:name.trim(), pwd:hashed, createdAt:new Date().toISOString() };
-      lsSet("accounts", accounts);
-      onAuth({ email, name:name.trim(), createdAt:accounts[email].createdAt });
-    } else {
-      const acc = accounts[email];
-      if (!acc || acc.pwd !== hashed) { setErr("E-Mail oder Passwort falsch."); setBusy(false); return; }
-      onAuth({ email, name:acc.name, createdAt:acc.createdAt });
+    try {
+      if (mode==="register") {
+        await signUp(email, pwd, name.trim());
+        // Bei aktivierter E-Mail-Verifizierung: User ist noch nicht eingeloggt
+        // Wir versuchen direkt Login (klappt, wenn Confirmation deaktiviert ist)
+        try { await signIn(email, pwd); }
+        catch { setErr("Bitte E-Mail bestätigen und dann anmelden."); setBusy(false); return; }
+      } else {
+        await signIn(email, pwd);
+      }
+      // onAuthChange im App-Root übernimmt den Rest
+      onAuth();
+    } catch (e) {
+      setErr(e?.message || "Fehler bei der Anmeldung.");
     }
     setBusy(false);
   };
@@ -353,7 +356,7 @@ function AuthView({ onAuth }) {
           </div>
           {err && <p style={{fontSize:12,color:c.red,margin:"4px 0 0",background:"rgba(192,57,43,0.06)",padding:"7px 11px",borderRadius:8,border:"1px solid rgba(192,57,43,0.2)"}}>{err}</p>}
           <button onClick={submit} disabled={busy} style={{...primaryBtn,marginTop:10,opacity:busy?0.6:1}}>{busy?"…":(mode==="login"?"Anmelden →":"Konto erstellen →")}</button>
-          <p style={{fontSize:11,color:c.faint,textAlign:"center",margin:"8px 0 0",lineHeight:1.5}}>Aktuell lokale Speicherung im Browser.<br/>Cloud-Sync (Supabase) folgt.</p>
+          <p style={{fontSize:11,color:c.faint,textAlign:"center",margin:"8px 0 0",lineHeight:1.5}}>🔒 Daten sicher in Supabase EU.<br/>Verschlüsselt & DSGVO-konform.</p>
         </div>
       </div>
     </div>
@@ -468,26 +471,35 @@ function ProfileView({ formData, setFormData, prov, user }) {
 }
 
 // ─── DOCUMENTS VIEW ──────────────────────────────────────────────────────────
-function DocumentsView({ documents, setDocuments }) {
+function DocumentsView({ documents, setDocuments, userId }) {
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
   const fileRef = useRef(null);
 
-  const handleUpload = (files) => {
+  const handleUpload = async (files) => {
     setErr("");
-    Array.from(files).forEach(file => {
-      if (file.size > 5 * 1024 * 1024) { setErr(`${file.name} ist größer als 5MB. Bitte komprimieren.`); return; }
-      const reader = new FileReader();
-      reader.onload = () => {
-        const doc = {
-          id: Math.random().toString(36).slice(2),
-          name: file.name, type: file.type, size: file.size,
-          base64: reader.result,
-          uploaded: new Date().toISOString()
-        };
-        setDocuments(d => [...d, doc]);
-      };
-      reader.readAsDataURL(file);
-    });
+    if (!userId) { setErr("Bitte erst anmelden."); return; }
+    setBusy(true);
+    for (const file of Array.from(files)) {
+      if (file.size > 25 * 1024 * 1024) { setErr(`${file.name} > 25MB.`); continue; }
+      try {
+        const doc = await uploadDocument(userId, file);
+        if (doc) setDocuments(d => [doc, ...d]);
+      } catch (e) {
+        setErr(`Upload fehlgeschlagen: ${e?.message || e}`);
+      }
+    }
+    setBusy(false);
+  };
+
+  const handleDelete = async (doc) => {
+    setDocuments(arr => arr.filter(x => x.id !== doc.id));
+    await deleteDocument(doc);
+  };
+
+  const handleDownload = async (doc) => {
+    const url = await getDocumentUrl(doc.storage_path);
+    if (url) window.open(url, "_blank");
   };
 
   const formatSize = (b) => b < 1024 ? b+"B" : b < 1024*1024 ? (b/1024).toFixed(1)+"KB" : (b/1024/1024).toFixed(1)+"MB";
@@ -506,7 +518,7 @@ function DocumentsView({ documents, setDocuments }) {
           <h1 style={{fontSize:26,fontWeight:400,color:c.dark,fontStyle:"italic",margin:0}}>Dokumente</h1>
           <p style={{fontSize:12,color:c.muted,margin:"2px 0 0"}}>{documents.length} Dokument{documents.length!==1?"e":""} · zum Anhängen an Schreiben</p>
         </div>
-        <button onClick={()=>fileRef.current?.click()} style={{...primaryBtn,width:"auto",padding:"11px 20px"}}>+ Hochladen</button>
+        <button onClick={()=>fileRef.current?.click()} disabled={busy} style={{...primaryBtn,width:"auto",padding:"11px 20px",opacity:busy?0.6:1}}>{busy?"Lädt …":"+ Hochladen"}</button>
         <input ref={fileRef} type="file" multiple accept="image/*,.pdf,.doc,.docx" style={{display:"none"}} onChange={e=>e.target.files&&handleUpload(e.target.files)}/>
       </div>
 
@@ -514,7 +526,7 @@ function DocumentsView({ documents, setDocuments }) {
 
       <div style={{...cardStyle,marginBottom:14,background:"rgba(74,124,111,0.04)",border:"1px dashed rgba(74,124,111,0.25)"}} onDragOver={e=>{e.preventDefault();e.stopPropagation();}} onDrop={e=>{e.preventDefault();e.stopPropagation();if(e.dataTransfer.files)handleUpload(e.dataTransfer.files);}}>
         <p style={{fontSize:13,color:c.green,fontFamily:"Georgia,serif",margin:0,textAlign:"center"}}>📥 Dateien hierhin ziehen oder oben hochladen</p>
-        <p style={{fontSize:11,color:c.muted,margin:"4px 0 0",textAlign:"center"}}>Sterbeurkunde, Totenschein, Personalausweis, Versicherungspolicen … (max. 5MB pro Datei)</p>
+        <p style={{fontSize:11,color:c.muted,margin:"4px 0 0",textAlign:"center"}}>Sterbeurkunde, Totenschein, Personalausweis, Versicherungspolicen … (max. 25MB pro Datei)</p>
       </div>
 
       {documents.length===0 ? (
@@ -527,12 +539,12 @@ function DocumentsView({ documents, setDocuments }) {
                 <span style={{fontSize:28,lineHeight:1}}>{iconFor(d.type)}</span>
                 <div style={{flex:1,minWidth:0}}>
                   <p style={{fontSize:13,color:c.dark,fontFamily:"Georgia,serif",margin:0,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{d.name}</p>
-                  <p style={{fontSize:11,color:c.muted,margin:"2px 0 0"}}>{formatSize(d.size)} · {new Date(d.uploaded).toLocaleDateString("de-DE")}</p>
+                  <p style={{fontSize:11,color:c.muted,margin:"2px 0 0"}}>{formatSize(d.size)} · {new Date(d.created_at).toLocaleDateString("de-DE")}</p>
                 </div>
               </div>
               <div style={{display:"flex",gap:6}}>
-                <a href={d.base64} download={d.name} style={{...ghostBtn,flex:1,textAlign:"center",padding:"7px",fontSize:12,textDecoration:"none"}}>↓ Download</a>
-                <button onClick={()=>setDocuments(arr=>arr.filter(x=>x.id!==d.id))} style={{...ghostBtn,padding:"7px 11px",fontSize:12,color:c.red,borderColor:"rgba(192,57,43,0.3)"}}>🗑</button>
+                <button onClick={()=>handleDownload(d)} style={{...ghostBtn,flex:1,textAlign:"center",padding:"7px",fontSize:12}}>↓ Öffnen</button>
+                <button onClick={()=>handleDelete(d)} style={{...ghostBtn,padding:"7px 11px",fontSize:12,color:c.red,borderColor:"rgba(192,57,43,0.3)"}}>🗑</button>
               </div>
             </div>
           ))}
@@ -545,10 +557,18 @@ function DocumentsView({ documents, setDocuments }) {
 // ─── MESSAGES VIEW ───────────────────────────────────────────────────────────
 function MessagesView({ messages, setMessages }) {
   const [activeId, setActiveId] = useState(null);
-  const sorted = [...messages].sort((a,b)=>new Date(b.date)-new Date(a.date));
+  const sorted = [...messages].sort((a,b)=>new Date(b.received_at)-new Date(a.received_at));
   const active = sorted.find(m=>m.id===activeId);
 
-  const markRead = (id) => setMessages(m=>m.map(x=>x.id===id?{...x,read:true}:x));
+  const markRead = async (id) => {
+    setMessages(m=>m.map(x=>x.id===id?{...x,read:true}:x));
+    await markMessageRead(id);
+  };
+  const handleDelete = async (id) => {
+    setMessages(m=>m.filter(x=>x.id!==id));
+    await deleteMessage(id);
+    setActiveId(null);
+  };
 
   return (
     <div>
@@ -571,8 +591,8 @@ function MessagesView({ messages, setMessages }) {
             }}>
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
                 {!m.read && <span style={{width:7,height:7,borderRadius:"50%",background:c.green,flexShrink:0}}/>}
-                <span style={{fontSize:13,color:c.dark,fontFamily:"Georgia,serif",fontWeight:m.read?400:700,flex:1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{m.from}</span>
-                <span style={{fontSize:10,color:c.muted}}>{new Date(m.date).toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit"})}</span>
+                <span style={{fontSize:13,color:c.dark,fontFamily:"Georgia,serif",fontWeight:m.read?400:700,flex:1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{m.from_name}</span>
+                <span style={{fontSize:10,color:c.muted}}>{new Date(m.received_at).toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit"})}</span>
               </div>
               <p style={{fontSize:12,color:c.dark,margin:"0 0 2px",fontWeight:m.read?400:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{m.subject}</p>
               <p style={{fontSize:11,color:c.muted,margin:0,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{m.body.slice(0,80)}…</p>
@@ -585,15 +605,15 @@ function MessagesView({ messages, setMessages }) {
             <div style={{padding:24}}>
               <div style={{paddingBottom:14,borderBottom:"1px solid rgba(0,0,0,0.06)",marginBottom:16}}>
                 <p style={{fontSize:11,color:c.muted,letterSpacing:"0.08em",textTransform:"uppercase",margin:0}}>Von</p>
-                <p style={{fontSize:15,color:c.dark,fontFamily:"Georgia,serif",margin:"2px 0 8px",fontWeight:600}}>{active.from}</p>
+                <p style={{fontSize:15,color:c.dark,fontFamily:"Georgia,serif",margin:"2px 0 8px",fontWeight:600}}>{active.from_name}</p>
                 <p style={{fontSize:11,color:c.muted,letterSpacing:"0.08em",textTransform:"uppercase",margin:0}}>Betreff</p>
                 <p style={{fontSize:18,color:c.dark,fontFamily:"Georgia,serif",fontStyle:"italic",margin:"2px 0 8px"}}>{active.subject}</p>
-                <p style={{fontSize:11,color:c.muted,margin:0}}>{new Date(active.date).toLocaleString("de-DE")}</p>
+                <p style={{fontSize:11,color:c.muted,margin:0}}>{new Date(active.received_at).toLocaleString("de-DE")}</p>
               </div>
               <p style={{fontSize:14,color:c.dark,fontFamily:"Georgia,serif",lineHeight:1.7,whiteSpace:"pre-wrap",margin:0}}>{active.body}</p>
               <div style={{display:"flex",gap:8,marginTop:24,paddingTop:14,borderTop:"1px solid rgba(0,0,0,0.06)"}}>
                 <button style={ghostBtn}>↩ Antworten</button>
-                <button onClick={()=>{setMessages(m=>m.filter(x=>x.id!==active.id));setActiveId(null);}} style={{...ghostBtn,color:c.red,borderColor:"rgba(192,57,43,0.3)"}}>🗑 Löschen</button>
+                <button onClick={()=>handleDelete(active.id)} style={{...ghostBtn,color:c.red,borderColor:"rgba(192,57,43,0.3)"}}>🗑 Löschen</button>
               </div>
             </div>
           ) : (
@@ -632,75 +652,94 @@ export default function App() {
   const [funeralLoading, setFuneralLoading] = useState(false);
   const [funeralSort, setFuneralSort] = useState("rating");
 
-  // Hydrate from localStorage on mount
-  useEffect(() => {
-    const u = lsGet("user", null);
-    if (u) {
-      setUser(u);
-      setFormData(lsGet("formData_"+u.email, {}));
-      setProv(lsGet("prov_"+u.email, {kv:null,internet:null,mobile:null,bank:null,streaming:[],insurance:[]}));
-      setStatuses(lsGet("statuses_"+u.email, {}));
-      setDocuments(lsGet("documents_"+u.email, []));
-      const msgs = lsGet("messages_"+u.email, null);
-      if (msgs) setChatMessages(msgs);
-      else {
-        // Seed example messages for new users
-        const seed = [
-          {id:"seed1", from:"Standesamt München", subject:"Eingangsbestätigung Antrag Sterbeurkunde", date:new Date(Date.now()-2*86400000).toISOString(), read:false, body:"Sehr geehrte/r Antragsteller/in,\n\nwir bestätigen den Eingang Ihres Antrags auf Ausstellung einer Sterbeurkunde. Die Bearbeitung erfolgt voraussichtlich innerhalb von 3 Werktagen. Sie können die Urkunde gegen Vorlage Ihres Personalausweises persönlich abholen oder gegen Aufpreis per Post zusenden lassen.\n\nMit freundlichen Grüßen\nStandesamt München", taskId:"sterbeurkunde"},
-          {id:"seed2", from:"Begleiter-Team", subject:"Willkommen im Begleiter", date:new Date().toISOString(), read:false, body:"Schön, dass Sie da sind.\n\nIm Nachrichten-Center sehen Sie Antworten auf alle digital versandten Schreiben. Antworten von Behörden und Versicherungen werden hier automatisch zugeordnet, sobald sie eingehen.\n\nWenn Sie Fragen haben: Der KI-Assistent rechts auf dem Dashboard kennt Ihre Aufgaben und hilft mit Fristen, Schritten und Briefen.\n\nIhr Begleiter-Team"},
-        ];
-        setChatMessages(seed);
-      }
-      const t = lsGet("tasks_"+u.email, []);
-      if (t.length > 0) {
-        setTasks(t);
-        setPage("dash");
-      } else {
-        const fd = lsGet("formData_"+u.email, {});
-        const pr = lsGet("prov_"+u.email, {kv:null,internet:null,mobile:null,bank:null,streaming:[],insurance:[]});
-        if (fd.deceased_name) {
-          setTasks(makeTasks(fd, pr));
-          setPage("dash");
-        } else {
-          setPage("ob");
-        }
-      }
+  // Estate ID for the active nachlass record
+  const [estateId, setEstateId] = useState(null);
+
+  // Load user data from Supabase
+  const loadUserData = async (authUser) => {
+    if (!authUser) return;
+    const fullName = authUser.user_metadata?.full_name || authUser.email?.split("@")[0] || "";
+    setUser({ id: authUser.id, email: authUser.email, name: fullName });
+
+    // Load estate
+    const estate = await loadEstate(authUser.id);
+    if (estate) {
+      setEstateId(estate.id);
+      const fd = estate.form_data || {};
+      const pr = estate.providers || {kv:null,internet:null,mobile:null,bank:null,streaming:[],insurance:[]};
+      setFormData(fd);
+      setProv(pr);
+
+      // Load statuses
+      const sts = await loadStatuses(estate.id);
+      const stMap = {};
+      sts.forEach(s => { stMap[s.task_id] = { mode:s.mode, date:new Date(s.status_date).toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit",year:"numeric"}), letter:s.letter||"", note:s.note||"", attachments:s.attachments||[] }; });
+      setStatuses(stMap);
+
+      // Generate tasks
+      if (fd.deceased_name) { setTasks(makeTasks(fd, pr)); setPage("dash"); }
+      else setPage("ob");
+    } else {
+      setEstateId(null);
+      setPage("ob");
     }
-    setHydrated(true);
+
+    // Load documents + messages in parallel
+    const [docs, msgs] = await Promise.all([loadDocuments(authUser.id), loadMessages(authUser.id)]);
+    setDocuments(docs);
+
+    // Seed welcome message if completely empty
+    if (msgs.length === 0) {
+      const welcome = await insertMessage(authUser.id, {
+        from_name: "Begleiter-Team",
+        subject: "Willkommen im Begleiter",
+        body: "Schön, dass Sie da sind.\n\nIm Nachrichten-Center sehen Sie Antworten auf alle digital versandten Schreiben. Antworten von Behörden und Versicherungen werden hier automatisch zugeordnet.\n\nDer KI-Assistent rechts auf dem Dashboard kennt Ihre Aufgaben und hilft mit Fristen, Schritten und Briefen.\n\nIhr Begleiter-Team"
+      });
+      setChatMessages(welcome ? [welcome] : []);
+    } else {
+      setChatMessages(msgs);
+    }
+  };
+
+  // On mount: check session + listen for auth changes
+  useEffect(() => {
+    if (!supabaseAvailable()) { setHydrated(true); setPage("auth"); return; }
+    (async () => {
+      const u = await getCurrentUser();
+      if (u) await loadUserData(u);
+      else setPage("auth");
+      setHydrated(true);
+    })();
+    const { data:{ subscription } } = onAuthChange(async (u) => {
+      if (u) { await loadUserData(u); }
+      else { setUser(null); setPage("auth"); setEstateId(null); }
+    });
+    return () => subscription?.unsubscribe();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Persist on change
-  useEffect(() => { if (hydrated) lsSet("user", user); }, [user, hydrated]);
-  useEffect(() => { if (hydrated && user) lsSet("formData_"+user.email, formData); }, [formData, user, hydrated]);
-  useEffect(() => { if (hydrated && user) lsSet("prov_"+user.email, prov); }, [prov, user, hydrated]);
-  useEffect(() => { if (hydrated && user) lsSet("statuses_"+user.email, statuses); }, [statuses, user, hydrated]);
-  useEffect(() => { if (hydrated && user) lsSet("documents_"+user.email, documents); }, [documents, user, hydrated]);
-  useEffect(() => { if (hydrated && user) lsSet("messages_"+user.email, chatMessages); }, [chatMessages, user, hydrated]);
-  useEffect(() => { if (hydrated && user) lsSet("tasks_"+user.email, tasks); }, [tasks, user, hydrated]);
+  // Debounced save of estate (form_data + providers)
+  useDebouncedEffect(() => {
+    if (!hydrated || !user) return;
+    if (!formData.deceased_name && !estateId) return; // nothing to save yet
+    saveEstate(user.id, estateId, formData, prov).then(saved => {
+      if (saved && !estateId) setEstateId(saved.id);
+    });
+  }, [formData, prov, user, hydrated], 800);
 
   const setField = (k,v) => setFormData(prev=>({...prev,[k]:v}));
 
-  const handleAuth = (u) => {
-    setUser(u);
-    const fd = lsGet("formData_"+u.email, {});
-    const pr = lsGet("prov_"+u.email, {kv:null,internet:null,mobile:null,bank:null,streaming:[],insurance:[]});
-    setFormData(fd);
-    setProv(pr);
-    setStatuses(lsGet("statuses_"+u.email, {}));
-    setDocuments(lsGet("documents_"+u.email, []));
-    setChatMessages(lsGet("messages_"+u.email, []));
-    const t = lsGet("tasks_"+u.email, []);
-    if (t.length > 0) { setTasks(t); setPage("dash"); }
-    else if (fd.deceased_name) { setTasks(makeTasks(fd, pr)); setPage("dash"); }
-    else { setPage("ob"); setObStep(0); }
+  const handleAuth = () => {
+    // onAuthChange listener im Mount-useEffect übernimmt das Laden
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    await signOut();
     setUser(null);
+    setEstateId(null);
     setFormData({}); setProv({kv:null,internet:null,mobile:null,bank:null,streaming:[],insurance:[]});
     setTasks([]); setStatuses({}); setDocuments([]); setChatMessages([]);
     setPage("auth"); setNavTab("dash"); setDashView("list");
-    if (typeof window !== "undefined") localStorage.removeItem(LS_PREFIX+"user");
   };
 
   const finishOb = (fd, pr) => {
@@ -739,30 +778,44 @@ export default function App() {
     setDashView("letter");
   };
 
-  const doSend = (mode) => {
+  const doSend = async (mode) => {
     setSentMode(mode);
     setStatuses(s=>({...s,[active.id]:{mode,date:fmtDate(),letter,attachments:letterDocIds}}));
-    // Simulate response message after digital send (3s delay)
-    if (mode === "digital") {
-      setTimeout(() => {
-        const msg = {
-          id: Math.random().toString(36).slice(2),
-          from: active.inst,
+    setDashView("sent");
+    if (user && estateId) {
+      await upsertStatus(user.id, estateId, active.id, {
+        mode, status_date: new Date().toISOString().slice(0,10),
+        letter, attachments: letterDocIds
+      });
+    }
+    if (mode === "digital" && user) {
+      // Mock-Eingangsbestätigung 3s später in DB einfügen
+      setTimeout(async () => {
+        const msg = await insertMessage(user.id, {
+          task_id: active.id,
+          from_name: active.inst,
           subject: `Eingangsbestätigung – ${active.title}`,
-          date: new Date().toISOString(),
-          read: false,
-          taskId: active.id,
           body: `Sehr geehrte/r Antragsteller/in,\n\nvielen Dank für Ihre Nachricht. Wir haben Ihr Anliegen erhalten und werden uns innerhalb der gesetzlichen Frist bei Ihnen melden.\n\nBei Rückfragen geben Sie bitte das Datum vom ${fmtDate()} an.\n\nMit freundlichen Grüßen\n${active.inst}`
-        };
-        setChatMessages(m => [msg, ...m]);
+        });
+        if (msg) setChatMessages(m => [msg, ...m]);
       }, 3000);
     }
-    setDashView("sent");
   };
 
-  const markDone = (id) => {
+  const markDone = async (id) => {
     setStatuses(s=>({...s,[id]:{mode:"manual",date:fmtDate(),letter:""}}));
     setDashView("list"); setActive(null);
+    if (user && estateId) {
+      await upsertStatus(user.id, estateId, id, {
+        mode:"manual", status_date: new Date().toISOString().slice(0,10), letter:""
+      });
+    }
+  };
+
+  const resetStatus = async (id) => {
+    setStatuses(s => { const n={...s}; delete n[id]; return n; });
+    if (estateId) await deleteStatus(estateId, id);
+    setDashView("list");
   };
 
   const searchFuneral = useCallback(async () => {
@@ -1040,7 +1093,7 @@ export default function App() {
   // MESSAGES
   if (navTab==="messages") return wideShell(<MessagesView messages={chatMessages} setMessages={setChatMessages}/>, 1100);
   // DOCUMENTS
-  if (navTab==="documents") return wideShell(<DocumentsView documents={documents} setDocuments={setDocuments}/>, 1100);
+  if (navTab==="documents") return wideShell(<DocumentsView documents={documents} setDocuments={setDocuments} userId={user?.id}/>, 1100);
 
   // FUNERAL
   if (dashView==="funeral") return narrowShell(
@@ -1080,7 +1133,11 @@ export default function App() {
             </div>
             <div style={{display:"flex",gap:8}}>
               <a href={f.mapsUrl} target="_blank" rel="noopener noreferrer" style={{...ghostBtn,textDecoration:"none",flex:1,textAlign:"center",padding:"9px",display:"inline-block"}}>🗺 Maps</a>
-              <button style={{...primaryBtn,flex:2,padding:"9px",width:"auto"}} onClick={()=>{setStatuses(s=>({...s,bestattung:{mode:"manual",date:fmtDate(),letter:"",note:`${f.name} kontaktiert`}}));setDashView("list");}}>Ausgewählt ✓</button>
+              <button style={{...primaryBtn,flex:2,padding:"9px",width:"auto"}} onClick={async ()=>{
+                setStatuses(s=>({...s,bestattung:{mode:"manual",date:fmtDate(),letter:"",note:`${f.name} kontaktiert`}}));
+                setDashView("list");
+                if (user && estateId) await upsertStatus(user.id, estateId, "bestattung", {mode:"manual",status_date:new Date().toISOString().slice(0,10),letter:"",note:`${f.name} kontaktiert`});
+              }}>Ausgewählt ✓</button>
             </div>
           </div>
         ))}
@@ -1168,7 +1225,7 @@ export default function App() {
           {st.letter && <><p style={{fontSize:11,color:c.muted,marginBottom:6}}>Versandtes Schreiben:</p><textarea style={{...textareaStyle,opacity:.65}} value={st.letter} readOnly/></>}
           <div style={{display:"flex",gap:8,marginTop:14,flexWrap:"wrap"}}>
             {st.letter && <button style={ghostBtn} onClick={()=>{setLetter(st.letter);setDashView("letter");}}>Brief bearbeiten</button>}
-            <button style={{...ghostBtn,color:c.red,borderColor:"rgba(192,57,43,0.3)"}} onClick={()=>{const n={...statuses};delete n[active.id];setStatuses(n);setDashView("list");}}>Zurücksetzen</button>
+            <button style={{...ghostBtn,color:c.red,borderColor:"rgba(192,57,43,0.3)"}} onClick={()=>resetStatus(active.id)}>Zurücksetzen</button>
           </div>
         </div>
         <FaqSection taskId={active.id}/>
